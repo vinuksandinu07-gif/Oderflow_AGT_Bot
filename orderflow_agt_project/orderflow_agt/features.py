@@ -1,121 +1,109 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple
-
-import numpy as np
-import pandas as pd
-
-from .models import Bar, FootprintSnapshot, ValueProfile
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
 
 
-def compute_delta(footprint: FootprintSnapshot) -> float:
-    """Delta = ask volume minus bid volume when real inputs exist.
+@dataclass
+class MarketConfig:
+    """Instrument and market metadata.
 
-    This is intentionally strict: no fabricated delta if the underlying data are absent.
+    session_hours_utc is intentionally left blank until the operator provides it.
+    This is explicit and refuses to invent a trading session from the video transcript.
     """
-    if footprint is None:
-        raise ValueError("No footprint snapshot available for delta calculation.")
-    return float(footprint.ask_vol - footprint.bid_vol)
+    symbol: str = "NASDAQ100"
+    tick_size: float = 0.01
+    point_value: float = 1.0
+    multiplier: float = 1.0
+    timezone: str = "UTC"
+    exchange_timezone: str = "America/New_York"
+    session_hours_utc: Optional[List[Tuple[int, int]]] = None
+    value_area_percent: float = 0.70
+    profile_method: str = "swing"
+    allow_ohlcv_proxy: bool = False
+    require_real_footprint_for_exact_models: bool = True
+    effort_box_source: str = "external"
+    source_provenance: str = "SOURCE_EXPLICIT"
 
 
-def compute_delta_ratio(footprint: FootprintSnapshot) -> float:
-    if footprint is None:
-        raise ValueError("No footprint snapshot available for delta ratio calculation.")
-    denom = max(abs(footprint.bid_vol) + abs(footprint.ask_vol), 1e-9)
-    return float((footprint.ask_vol - footprint.bid_vol) / denom)
+@dataclass
+class RiskConfig:
+    """Fail-closed risk limits used by both paper and live paths."""
+    account_equity: Optional[float] = None  # OPERATOR_REQUIRED
+    risk_per_trade: Optional[float] = None  # OPERATOR_REQUIRED
+    daily_loss_limit: Optional[float] = None  # OPERATOR_REQUIRED for live; optional for paper
+    max_drawdown: Optional[float] = None  # OPERATOR_REQUIRED
+    max_concurrent_positions: int = 1
+    aggregate_risk_limit: Optional[float] = None
+    max_adds: int = 0
+    max_order_qty: Optional[float] = None
+    min_order_qty: float = 1.0
+    lot_step: float = 1.0
+    max_loss_streak: Optional[int] = None
+    stop_buffer_ticks: float = 1.0
+    stop_rounding: str = "tick"
+    allow_pyramiding: bool = False
+    allow_averaging_down: bool = False
+    default_live_mode: bool = False
 
 
-def compute_vwap(bars: Sequence[Bar]) -> Optional[float]:
-    """VWAP where volume semantics support a valid computation."""
-    if not bars:
-        return None
-    total_volume = sum(float(b.volume) for b in bars)
-    if total_volume <= 0:
-        return None
-    weighted = sum(float(b.close) * float(b.volume) for b in bars)
-    return float(weighted / total_volume)
+@dataclass
+class StrategyConfig:
+    """Strategy parameters. Unknown source values are labeled assumptions."""
+    enabled: bool = True
+    min_confirmation_bars: int = 1
+    use_real_effort_boxes: bool = False
+    require_value_context: bool = True
+    require_delta_confirmation: bool = True
+    allow_1r_target: bool = True
+    allow_1_2_target: bool = False
+    target_rr: float = 1.0
+    max_trailing_boxes: int = 5
+    min_absorption_strength: float = 1.5  # ENGINEERING_ASSUMPTION
+    delta_threshold: float = 0.0  # ENGINEERING_ASSUMPTION
+    use_ohlcv_proxy: bool = False  # EXPERIMENTAL_PROXY
+    exit_policy: str = "trail_stop"
+    use_partial_exits: bool = False  # SOURCE_EXPLICIT: default no partial profits
 
 
-def compute_value_profile(bars: Sequence[Bar], value_area_percent: float = 0.70, tick_size: float = 0.01) -> ValueProfile:
-    """Simple deterministic volume profile approximation.
+@dataclass
+class OrderflowConfig:
+    market: MarketConfig = field(default_factory=MarketConfig)
+    risk: RiskConfig = field(default_factory=RiskConfig)
+    directional_drift: StrategyConfig = field(default_factory=StrategyConfig)
+    machine_gun_scalp: StrategyConfig = field(default_factory=StrategyConfig)
+    mean_reversion: StrategyConfig = field(default_factory=StrategyConfig)
+    momentum: StrategyConfig = field(default_factory=StrategyConfig)
 
-    This is not a source fact about the proprietary NASDAQ profile model; it is a transparent research proxy.
-    """
-    if not bars:
-        raise ValueError("Need bars to compute a value profile.")
-    closes = np.asarray([float(b.close) for b in bars], dtype=float)
-    price_range = float(np.max(closes) - np.min(closes))
-    if price_range <= 0:
-        price_range = tick_size
-    bins = np.arange(np.min(closes), np.max(closes) + tick_size, tick_size)
-    if len(bins) < 2:
-        bins = np.array([np.min(closes), np.max(closes) + tick_size])
-    values, edges = np.histogram(closes, bins=bins)
-    poc = float(edges[np.argmax(values)] + tick_size / 2.0)
-    cum = np.cumsum(values)
-    total = max(float(cum[-1]), 1.0)
-    target = total * value_area_percent
-    lower_idx = int(np.searchsorted(cum, target * 0.5, side="left"))
-    upper_idx = int(np.searchsorted(cum, target, side="right"))
-    left = float(edges[lower_idx] + tick_size / 2.0)
-    right = float(edges[min(upper_idx, len(edges) - 1)] + tick_size / 2.0)
-    return ValueProfile(
-        timestamp=bars[-1].timestamp,
-        poc=poc,
-        vah=max(left, right),
-        val=min(left, right),
-        left=min(left, right),
-        right=max(left, right),
-        volume_total=float(total),
-    )
+    @staticmethod
+    def from_dict(data: Dict[str, Any]) -> "OrderflowConfig":
+        return OrderflowConfig(
+            market=MarketConfig(**data.get("market", {})),
+            risk=RiskConfig(**data.get("risk", {})),
+            directional_drift=StrategyConfig(**data.get("directional_drift", {})),
+            machine_gun_scalp=StrategyConfig(**data.get("machine_gun_scalp", {})),
+            mean_reversion=StrategyConfig(**data.get("mean_reversion", {})),
+            momentum=StrategyConfig(**data.get("momentum", {})),
+        )
 
 
-def compute_value_migration(prev: Optional[ValueProfile], curr: Optional[ValueProfile]) -> float:
-    if prev is None or curr is None:
-        return 0.0
-    return float(curr.poc - prev.poc)
+def validate_config(cfg: OrderflowConfig) -> None:
+    """Hard-fail on critical invalid settings."""
+    if cfg.risk.account_equity is None or cfg.risk.risk_per_trade is None:
+        raise ValueError("OPERATOR_REQUIRED: account_equity and risk_per_trade must be populated before sizing or live deployment.")
+    if cfg.risk.stop_buffer_ticks <= 0:
+        raise ValueError("stop_buffer_ticks must be positive.")
+    if cfg.risk.default_live_mode:
+        if cfg.market.session_hours_utc is None:
+            raise ValueError("OPERATOR_REQUIRED: session_hours_utc is required before live mode can be enabled.")
+        if cfg.risk.daily_loss_limit is None or cfg.risk.max_drawdown is None:
+            raise ValueError("OPERATOR_REQUIRED: daily_loss_limit and max_drawdown are required for live mode.")
 
 
-def classify_value_context(prev: Optional[ValueProfile], curr: Optional[ValueProfile]) -> str:
-    migration = compute_value_migration(prev, curr)
-    if migration > 0:
-        return "bullish_drift"
-    if migration < 0:
-        return "bearish_drift"
-    return "balanced_auction"
-
-
-def detect_absorption(delta: float, price_progress: float, requirement: float = 1.5, progress_threshold: float = 0.2) -> Optional[str]:
-    """Absorption hypothesis: strong aggression without enough price progress.
-
-    This is an engineering assumption used only as a research indicator; it is not a proprietary rule.
-    """
-    if abs(delta) < requirement and abs(price_progress) < progress_threshold:
-        return "buyer_absorption" if delta > 0 else "seller_absorption"
-    if abs(delta) < requirement:
-        return None
-    if abs(price_progress) < progress_threshold:
-        if delta > 0:
-            return "buyer_absorption"
-        return "seller_absorption"
-    return None
-
-
-def ohlcv_proxy_signal(bar: Bar, prev_close: Optional[float] = None, atr: Optional[float] = None) -> Optional[Dict[str, Any]]:
-    """Experimental OHLCV proxy. It is labeled as a proxy and never treated as real order flow."""
-    if prev_close is None:
-        prev_close = bar.close
-    if atr is None:
-        atr = max(abs(bar.high - bar.low), 1e-9)
-    impulse = abs(bar.close - prev_close) >= 1.5 * atr
-    if not impulse:
-        return None
-    side = "LONG" if bar.close >= prev_close else "SHORT"
-    return {
-        "strategy_id": "ohlcv_proxy",
-        "side": side,
-        "timestamp": bar.timestamp,
-        "delta": None,
-        "label": "EXPERIMENTAL_PROXY",
-        "note": "OHLCV proxy; not equivalent to real order-flow data.",
-    }
+__all__ = [
+    "MarketConfig",
+    "RiskConfig",
+    "StrategyConfig",
+    "OrderflowConfig",
+    "validate_config",
+]

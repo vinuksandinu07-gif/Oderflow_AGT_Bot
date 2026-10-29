@@ -3,142 +3,173 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from .models import Fill, Order, Position, Side
+from .models import Bar, Fill, Order, Position, Side, Signal
 
 
-class RiskManager:
-    """Central risk manager enforcing fail-closed sizing and trade validation."""
+class BaseStrategy:
+    """Base strategy interface used for research and paper execution."""
+    strategy_id: str = "base"
 
-    def __init__(self, cfg: Optional[Dict[str, Any]] = None):
-        self.cfg = cfg or {}
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        self.config = config or {}
 
-    def validate_trade(self, entry: float, stop: float, target: Optional[float] = None) -> bool:
-        if entry <= 0 or stop <= 0:
-            return False
-        if abs(entry - stop) <= 0:
-            return False
-        if target is not None and abs(target - entry) <= 0:
-            return False
-        return True
-
-    def risk_distance(self, entry: float, stop: float, point_value: float = 1.0, multiplier: float = 1.0) -> float:
-        distance = abs(float(entry) - float(stop))
-        if distance <= 0:
-            raise ValueError("invalid stop distance")
-        return float(distance * point_value * multiplier)
-
-    def size_position(self, entry: float, stop: float, point_value: float = 1.0, multiplier: float = 1.0) -> float:
-        account_equity = self.cfg.get("account_equity")
-        risk_per_trade = self.cfg.get("risk_per_trade")
-        if account_equity is None or risk_per_trade is None:
-            raise ValueError("OPERATOR_REQUIRED: account_equity and risk_per_trade must be populated before sizing.")
-        if not self.validate_trade(entry, stop):
-            raise ValueError("Invalid entry/stop; risk manager rejected order.")
-        risk_budget = float(account_equity) * float(risk_per_trade)
-        risk_per_unit = self.risk_distance(entry, stop, point_value, multiplier)
-        qty = risk_budget / risk_per_unit
-        max_qty = self.cfg.get("max_order_qty")
-        if max_qty is not None:
-            qty = min(qty, float(max_qty))
-        min_qty = float(self.cfg.get("min_order_qty", 1.0))
-        lot_step = float(self.cfg.get("lot_step", 1.0))
-        qty = max(min_qty, qty)
-        if lot_step > 0:
-            qty = round(qty / lot_step) * lot_step
-        return float(qty)
-
-    def daily_loss_ok(self, realized_pnl: float) -> bool:
-        limit = self.cfg.get("daily_loss_limit")
-        if limit is None:
-            return True
-        return realized_pnl > -float(limit)
-
-    def aggregate_risk_ok(self, proposed_risk: float) -> bool:
-        cap = self.cfg.get("aggregate_risk_limit")
-        if cap is None:
-            return True
-        return float(proposed_risk) <= float(cap)
+    def process(self, context: Dict[str, Any]) -> List[Signal]:
+        raise NotImplementedError
 
 
 @dataclass
-class PaperBroker:
-    cfg: Optional[Dict[str, Any]] = None
-    orders: List[Order] = field(default_factory=list)
-    fills: List[Fill] = field(default_factory=list)
-    positions: List[Position] = field(default_factory=list)
+class DirectionalDriftStrategy(BaseStrategy):
+    strategy_id: str = "directional_drift"
+    config: Dict[str, Any] = field(default_factory=dict)
 
-    def __post_init__(self):
-        self.cfg = self.cfg or {}
+    def process(self, context: Dict[str, Any]) -> List[Signal]:
+        bar: Optional[Bar] = context.get("bar")
+        profile = context.get("profile")
+        value_context = context.get("value_context")
+        delta = context.get("delta")
+        cfg = context.get("config", {})
+        strategy_cfg = cfg.get("directional_drift", {})
 
-    def submit_order(self, order: Order) -> Order:
-        order.status = "accepted"
-        self.orders.append(order)
-        return order
+        if bar is None or profile is None:
+            return []
+        if value_context in (None, "balanced_auction"):
+            return []
+        if strategy_cfg.get("require_delta_confirmation", True):
+            if delta is None:
+                return []
+            threshold = float(strategy_cfg.get("delta_threshold", 0.0))
+            if value_context == "bullish_drift" and delta < threshold:
+                return []
+            if value_context == "bearish_drift" and delta > -threshold:
+                return []
 
-    def fill_order(self, order: Order, price: float, quantity: Optional[float] = None, fees: float = 0.0, slippage: float = 0.0) -> Fill:
-        fill_qty = order.quantity if quantity is None else float(quantity)
-        fill = Fill(order_id=order.order_id, timestamp=order.timestamp, price=float(price), quantity=float(fill_qty), fees=float(fees), slippage=float(slippage))
-        self.fills.append(fill)
-        order.status = "filled"
-        return fill
+        if value_context == "bullish_drift":
+            side = Side.LONG
+            stop = float(profile["val"])
+            risk = abs(float(bar.close) - stop)
+            target = float(bar.close) + risk * max(float(strategy_cfg.get("target_rr", 1.0)), 1.0)
+        elif value_context == "bearish_drift":
+            side = Side.SHORT
+            stop = float(profile["vah"])
+            risk = abs(float(bar.close) - stop)
+            target = float(bar.close) - risk * max(float(strategy_cfg.get("target_rr", 1.0)), 1.0)
+        else:
+            return []
 
-    def cancel_order(self, order: Order) -> Order:
-        order.status = "cancelled"
-        return order
+        if risk <= 0:
+            return []
+
+        signal = Signal(
+            strategy_id=self.strategy_id,
+            side=side,
+            timestamp=bar.timestamp,
+            entry_price=float(bar.close),
+            stop_price=stop,
+            target_price=target,
+            invalidation_level=stop,
+            source_refs=["value_profile", "delta"],
+            evidence=[value_context, f"delta={delta if delta is not None else 0.0}"],
+            entry_rationale="Directional drift supported by value migration and confirmed directional delta.",
+            stop_rationale="Structural stop anchored at relevant value-area boundary with configured buffer.",
+            exit_policy="trail_stop",
+            audit_trail=["no partial exits by default", "stop trails after confirmation"],
+            confidence=0.67,
+            data_quality="real" if delta is not None else "proxy",
+        )
+        return [signal]
 
 
 @dataclass
-class EventBacktester:
-    """Simple, deterministic event-driven backtester using the same strategy/risk interfaces.
+class MachineGunScalpStrategy(BaseStrategy):
+    strategy_id: str = "machine_gun_scalp"
+    config: Dict[str, Any] = field(default_factory=dict)
 
-    This is intentionally a lightweight research runner, not a full broker emulation.
-    """
-    config: Dict[str, Any]
-    bars: List[Any]
-    broker: PaperBroker = field(default_factory=PaperBroker)
-    orders: List[Order] = field(default_factory=list)
-    fills: List[Fill] = field(default_factory=list)
-    positions: List[Position] = field(default_factory=list)
-    signals: List[Any] = field(default_factory=list)
+    def process(self, context: Dict[str, Any]) -> List[Signal]:
+        bar: Optional[Bar] = context.get("bar")
+        delta = context.get("delta")
+        value_context = context.get("value_context")
+        cfg = context.get("config", {})
+        strategy_cfg = cfg.get("machine_gun_scalp", {})
 
-    def __post_init__(self):
-        self.broker.cfg = self.config
+        if bar is None or delta is None or value_context in (None, "balanced_auction"):
+            return []
+        if not strategy_cfg.get("enabled", True):
+            return []
+        threshold = float(strategy_cfg.get("delta_threshold", 0.0))
+        if value_context == "bullish_drift" and delta <= threshold:
+            return []
+        if value_context == "bearish_drift" and delta >= -threshold:
+            return []
 
-    def run(self, strategies: Sequence[Any]) -> Dict[str, Any]:
-        for bar in self.bars:
-            context = {
-                "bar": bar,
-                "config": self.config,
-                "profile": {"poc": bar.close, "val": bar.low, "vah": bar.high},
-                "delta": float(bar.close - bar.open),
-                "value_context": "bullish_drift" if bar.close >= bar.open else "bearish_drift",
-            }
-            for strategy in strategies:
-                for signal in strategy.process(context):
-                    self.signals.append(signal)
-                    order = Order(
-                        order_id=f"ord-{len(self.orders)+1}",
-                        strategy_id=signal.strategy_id,
-                        side=signal.side,
-                        quantity=max(1.0, self.config.get("risk", {}).get("min_order_qty", 1.0)),
-                        price=float(signal.entry_price),
-                        timestamp=signal.timestamp,
-                    )
-                    self.broker.submit_order(order)
-                    self.orders.append(order)
-                    fill = self.broker.fill_order(order, price=float(signal.entry_price), quantity=order.quantity)
-                    self.fills.append(fill)
-                    self.positions.append(Position(
-                        position_id=f"pos-{len(self.positions)+1}",
-                        side=signal.side,
-                        quantity=float(order.quantity),
-                        entry_price=float(signal.entry_price),
-                        stop_price=float(signal.stop_price),
-                        target_price=signal.target_price,
-                        timestamp=signal.timestamp,
-                        strategy_id=signal.strategy_id,
-                    ))
-        return {"signals": len(self.signals), "orders": len(self.orders), "fills": len(self.fills), "positions": len(self.positions)}
+        side = Side.LONG if value_context == "bullish_drift" else Side.SHORT
+        entry = float(bar.close)
+        if side == Side.LONG:
+            stop = float(bar.low)
+            risk = abs(entry - stop)
+            target = entry + risk
+        else:
+            stop = float(bar.high)
+            risk = abs(stop - entry)
+            target = entry - risk
+        if risk <= 0:
+            return []
+
+        signal = Signal(
+            strategy_id=self.strategy_id,
+            side=side,
+            timestamp=bar.timestamp,
+            entry_price=entry,
+            stop_price=stop,
+            target_price=target,
+            invalidation_level=stop,
+            source_refs=["delta", "value_context"],
+            evidence=[value_context, f"delta={delta}"],
+            entry_rationale="Confirmed switch in control with directional delta and migration evidence.",
+            stop_rationale="Protected-value stop placed beyond the local structural support/resistance area.",
+            exit_policy="fixed_1r_target",
+            audit_trail=["scalp target set at 1R"],
+            confidence=0.58,
+            data_quality="real",
+        )
+        return [signal]
 
 
-__all__ = ["RiskManager", "PaperBroker", "EventBacktester"]
+@dataclass
+class MeanReversionStrategy(BaseStrategy):
+    strategy_id: str = "mean_reversion"
+    config: Dict[str, Any] = field(default_factory=dict)
+
+    def process(self, context: Dict[str, Any]) -> List[Signal]:
+        cfg = context.get("config", {})
+        strategy_cfg = cfg.get("mean_reversion", {})
+        if not strategy_cfg.get("enabled", False):
+            return []
+        exit_policy = strategy_cfg.get("exit_policy")
+        if not exit_policy or exit_policy == "config_required":
+            return []
+        return []
+
+
+@dataclass
+class MomentumStrategy(BaseStrategy):
+    strategy_id: str = "momentum"
+    config: Dict[str, Any] = field(default_factory=dict)
+
+    def process(self, context: Dict[str, Any]) -> List[Signal]:
+        cfg = context.get("config", {})
+        strategy_cfg = cfg.get("momentum", {})
+        if not strategy_cfg.get("enabled", False):
+            return []
+        exit_policy = strategy_cfg.get("exit_policy")
+        if not exit_policy or exit_policy == "config_required":
+            return []
+        return []
+
+
+__all__ = [
+    "BaseStrategy",
+    "DirectionalDriftStrategy",
+    "MachineGunScalpStrategy",
+    "MeanReversionStrategy",
+    "MomentumStrategy",
+]

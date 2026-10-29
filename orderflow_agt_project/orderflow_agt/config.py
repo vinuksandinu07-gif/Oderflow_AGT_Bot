@@ -1,104 +1,184 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
+import pandas as pd
+
+
+def ensure_utc(ts: Any) -> pd.Timestamp:
+    if isinstance(ts, pd.Timestamp):
+        out = ts
+    else:
+        out = pd.Timestamp(ts)
+    if out.tz is None:
+        out = out.tz_localize("UTC")
+    return out.tz_convert("UTC")
+
+
+class Side(str, Enum):
+    LONG = "LONG"
+    SHORT = "SHORT"
+
 
 @dataclass
-class MarketConfig:
-    """Instrument metadata with explicit provenance tags.
-
-    session_hours_utc is intentionally unspecified until an operator provides it.
-    """
+class Bar:
+    timestamp: Any
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float = 0.0
     symbol: str = "NASDAQ100"
-    tick_size: float = 0.01
-    point_value: float = 1.0
-    multiplier: float = 1.0
-    timezone: str = "UTC"
-    exchange_timezone: str = "America/New_York"
-    session_hours_utc: Optional[List[Tuple[int, int]]] = None
-    value_area_percent: float = 0.70
-    profile_method: str = "swing"
-    allow_ohlcv_proxy: bool = False
-    require_real_footprint_for_exact_models: bool = True
-    effort_box_source: str = "external"
-    source_provenance: str = "SOURCE_EXPLICIT"
+
+    def __post_init__(self):
+        self.timestamp = ensure_utc(self.timestamp)
 
 
 @dataclass
-class RiskConfig:
-    """Fail-closed risk limits. Missing values block trade sizing."""
-    account_equity: Optional[float] = None  # OPERATOR_REQUIRED
-    risk_per_trade: Optional[float] = None  # OPERATOR_REQUIRED
-    daily_loss_limit: Optional[float] = None  # OPERATOR_REQUIRED for live; optional in paper mode
-    max_drawdown: Optional[float] = None  # OPERATOR_REQUIRED
-    max_concurrent_positions: int = 1
-    aggregate_risk_limit: Optional[float] = None
-    max_adds: int = 0
-    max_order_qty: Optional[float] = None
-    min_order_qty: float = 1.0
-    lot_step: float = 1.0
-    max_loss_streak: Optional[int] = None
-    stop_buffer_ticks: float = 1.0
-    stop_rounding: str = "tick"
-    allow_pyramiding: bool = False
-    allow_averaging_down: bool = False
-    default_live_mode: bool = False
+class Quote:
+    timestamp: Any
+    bid: float
+    ask: float
+    symbol: str = "NASDAQ100"
+
+    def __post_init__(self):
+        self.timestamp = ensure_utc(self.timestamp)
 
 
 @dataclass
-class StrategyConfig:
-    enabled: bool = True
-    min_confirmation_bars: int = 1
-    use_real_effort_boxes: bool = False
-    require_value_context: bool = True
-    require_delta_confirmation: bool = True
-    allow_1r_target: bool = True
-    allow_1_2_target: bool = False
-    target_rr: float = 1.0
-    max_trailing_boxes: int = 5
-    min_absorption_strength: float = 1.5  # ENGINEERING_ASSUMPTION
-    delta_threshold: float = 0.0  # ENGINEERING_ASSUMPTION
-    use_ohlcv_proxy: bool = False  # EXPERIMENTAL_PROXY
+class Trade:
+    timestamp: Any
+    price: float
+    size: float
+    side: str
+    symbol: str = "NASDAQ100"
+
+    def __post_init__(self):
+        self.timestamp = ensure_utc(self.timestamp)
+
+
+@dataclass
+class FootprintSnapshot:
+    timestamp: Any
+    bid_vol: float
+    ask_vol: float
+    price_levels: Optional[List[float]] = None
+    symbol: str = "NASDAQ100"
+
+    def __post_init__(self):
+        self.timestamp = ensure_utc(self.timestamp)
+
+    @property
+    def delta(self) -> float:
+        return float(self.ask_vol - self.bid_vol)
+
+
+@dataclass
+class ValueProfile:
+    timestamp: Any
+    poc: float
+    vah: float
+    val: float
+    left: float
+    right: float
+    volume_total: float = 0.0
+
+    def __post_init__(self):
+        self.timestamp = ensure_utc(self.timestamp)
+
+
+@dataclass
+class EffortBox:
+    timestamp: Any
+    side: str
+    lower: float
+    upper: float
+    strength: float
+    source: str = "external"
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        self.timestamp = ensure_utc(self.timestamp)
+
+
+@dataclass
+class Signal:
+    strategy_id: str
+    side: Side
+    timestamp: Any
+    entry_price: float
+    stop_price: float
+    target_price: Optional[float]
+    invalidation_level: float
+    source_refs: List[str] = field(default_factory=list)
+    evidence: List[str] = field(default_factory=list)
+    entry_rationale: str = ""
+    stop_rationale: str = ""
     exit_policy: str = "trail_stop"
-    use_partial_exits: bool = False  # SOURCE_EXPLICIT: default no partial profits
+    audit_trail: List[str] = field(default_factory=list)
+    confidence: float = 0.0
+    data_quality: str = "real"
+
+    def __post_init__(self):
+        self.timestamp = ensure_utc(self.timestamp)
 
 
 @dataclass
-class OrderflowConfig:
-    market: MarketConfig = field(default_factory=MarketConfig)
-    risk: RiskConfig = field(default_factory=RiskConfig)
-    directional_drift: StrategyConfig = field(default_factory=StrategyConfig)
-    machine_gun_scalp: StrategyConfig = field(default_factory=StrategyConfig)
-    mean_reversion: StrategyConfig = field(default_factory=StrategyConfig)
-    momentum: StrategyConfig = field(default_factory=StrategyConfig)
+class Order:
+    order_id: str
+    strategy_id: str
+    side: Side
+    quantity: float
+    price: float
+    status: str = "submitted"
+    order_type: str = "market"
+    timestamp: Any = field(default_factory=lambda: pd.Timestamp.utcnow().tz_localize("UTC"))
 
-    @staticmethod
-    def from_dict(data: Dict[str, Any]) -> "OrderflowConfig":
-        return OrderflowConfig(
-            market=MarketConfig(**data.get("market", {})),
-            risk=RiskConfig(**data.get("risk", {})),
-            directional_drift=StrategyConfig(**data.get("directional_drift", {})),
-            machine_gun_scalp=StrategyConfig(**data.get("machine_gun_scalp", {})),
-            mean_reversion=StrategyConfig(**data.get("mean_reversion", {})),
-            momentum=StrategyConfig(**data.get("momentum", {})),
-        )
+    def __post_init__(self):
+        self.timestamp = ensure_utc(self.timestamp)
 
 
-def validate_config(cfg: OrderflowConfig) -> None:
-    if cfg.risk.account_equity is None or cfg.risk.risk_per_trade is None:
-        raise ValueError("OPERATOR_REQUIRED: account_equity and risk_per_trade must be populated before sizing or live deployment.")
-    if cfg.risk.stop_buffer_ticks <= 0:
-        raise ValueError("stop_buffer_ticks must be positive.")
-    if cfg.market.session_hours_utc is None:
-        # Source transcript does not define session hours; we fail closed for restricted session mode.
-        pass
+@dataclass
+class Fill:
+    order_id: str
+    timestamp: Any
+    price: float
+    quantity: float
+    fees: float = 0.0
+    slippage: float = 0.0
+
+    def __post_init__(self):
+        self.timestamp = ensure_utc(self.timestamp)
+
+
+@dataclass
+class Position:
+    position_id: str
+    side: Side
+    quantity: float
+    entry_price: float
+    stop_price: float
+    target_price: Optional[float]
+    timestamp: Any
+    strategy_id: str = "unknown"
+
+    def __post_init__(self):
+        self.timestamp = ensure_utc(self.timestamp)
 
 
 __all__ = [
-    "MarketConfig",
-    "RiskConfig",
-    "StrategyConfig",
-    "OrderflowConfig",
-    "validate_config",
+    "Bar",
+    "Quote",
+    "Trade",
+    "FootprintSnapshot",
+    "ValueProfile",
+    "EffortBox",
+    "Signal",
+    "Order",
+    "Fill",
+    "Position",
+    "Side",
+    "ensure_utc",
 ]
