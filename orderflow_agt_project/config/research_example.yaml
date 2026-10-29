@@ -1,0 +1,72 @@
+apiVersion: v1
+market:
+  symbol: "NASDAQ100"
+  tick_size: 0.01
+  point_value: 1.0
+  multiplier: 1.0
+  timezone: "UTC"
+  exchange_timezone: "America/New_York"
+  session_hours_utc: [[8, 16]]
+  value_area_percent: 0.70
+  profile_method: "swing"
+  allow_ohlcv_proxy: false
+  require_real_footprint_for_exact_models: true
+  effort_box_source: "external"
+
+risk:
+  account_equity: 100000.0
+  risk_per_trade: 0.01
+  daily_loss_limit: 2000.0
+  max_drawdown: 0.20
+  max_concurrent_positions: 1
+  aggregate_risk_limit: 0.05
+  max_adds: 0
+  max_order_qty: 1000.0
+  min_order_qty: 1.0
+  lot_step: 1.0
+  stop_buffer_ticks: 1.0
+  stop_rounding: "tick"
+  allow_pyramiding: false
+  allow_averaging_down: false
+  default_live_mode: false
+
+strategies:
+  directional_drift:
+    enabled: true
+    min_confirmation_bars: 1
+    use_real_effort_boxes: false
+    require_value_context: true
+    require_delta_confirmation: true
+    allow_1r_target: true
+    allow_1_2_target: false
+    target_rr: 1.0
+    max_trailing_boxes: 5
+    min_absorption_strength: 1.5
+    delta_threshold: 0.0
+    use_ohlcv_proxy: false
+    exit_policy: "trail_stop"
+    use_partial_exits: false
+
+  machine_gun_scalp:
+    enabled: true
+    min_confirmation_bars: 1
+    use_real_effort_boxes: false
+    require_value_context: true
+    require_delta_confirmation: true
+    allow_1r_target: true
+    allow_1_2_target: false
+    target_rr: 1.0
+    max_trailing_boxes: 0
+    min_absorption_strength: 1.0
+    delta_threshold: 0.0
+    use_ohlcv_proxy: false
+    exit_policy: "fixed_1r_target"
+    use_partial_exits: false
+
+  mean_reversion:
+    enabled: false
+    exit_policy: "config_required"
+
+  momentum:
+    enabled: false
+    exit_policy: "config_required"
