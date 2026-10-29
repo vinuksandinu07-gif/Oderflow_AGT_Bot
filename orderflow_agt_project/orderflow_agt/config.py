@@ -6,9 +6,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 @dataclass
 class MarketConfig:
-    """Instrument and data-market configuration.
+    """Instrument metadata with explicit provenance tags.
 
-    Note: session hours are OPERATOR_REQUIRED and intentionally blank/None by default.
+    session_hours_utc is intentionally unspecified until an operator provides it.
     """
     symbol: str = "NASDAQ100"
     tick_size: float = 0.01
@@ -27,10 +27,10 @@ class MarketConfig:
 
 @dataclass
 class RiskConfig:
-    """Risk configuration. Missing operator values fail closed."""
+    """Fail-closed risk limits. Missing values block trade sizing."""
     account_equity: Optional[float] = None  # OPERATOR_REQUIRED
     risk_per_trade: Optional[float] = None  # OPERATOR_REQUIRED
-    daily_loss_limit: Optional[float] = None  # OPERATOR_REQUIRED for live, optional for paper
+    daily_loss_limit: Optional[float] = None  # OPERATOR_REQUIRED for live; optional in paper mode
     max_drawdown: Optional[float] = None  # OPERATOR_REQUIRED
     max_concurrent_positions: int = 1
     aggregate_risk_limit: Optional[float] = None
@@ -48,7 +48,6 @@ class RiskConfig:
 
 @dataclass
 class StrategyConfig:
-    """Strategy configuration. Values with no source disclosure are labeled assumptions."""
     enabled: bool = True
     min_confirmation_bars: int = 1
     use_real_effort_boxes: bool = False
@@ -62,7 +61,7 @@ class StrategyConfig:
     delta_threshold: float = 0.0  # ENGINEERING_ASSUMPTION
     use_ohlcv_proxy: bool = False  # EXPERIMENTAL_PROXY
     exit_policy: str = "trail_stop"
-    use_partial_exits: bool = False  # SOURCE_EXPLICIT false by default
+    use_partial_exits: bool = False  # SOURCE_EXPLICIT: default no partial profits
 
 
 @dataclass
@@ -76,28 +75,30 @@ class OrderflowConfig:
 
     @staticmethod
     def from_dict(data: Dict[str, Any]) -> "OrderflowConfig":
-        market = MarketConfig(**data.get("market", {}))
-        risk = RiskConfig(**data.get("risk", {}))
-        strategies = data.get("strategies", {})
-        directional = StrategyConfig(**strategies.get("directional_drift", {}))
-        scalp = StrategyConfig(**strategies.get("machine_gun_scalp", {}))
-        reversal = StrategyConfig(**strategies.get("mean_reversion", {}))
-        momentum = StrategyConfig(**strategies.get("momentum", {}))
-        return OrderflowConfig(market=market, risk=risk,
-                               directional_drift=directional,
-                               machine_gun_scalp=scalp,
-                               mean_reversion=reversal,
-                               momentum=momentum)
+        return OrderflowConfig(
+            market=MarketConfig(**data.get("market", {})),
+            risk=RiskConfig(**data.get("risk", {})),
+            directional_drift=StrategyConfig(**data.get("directional_drift", {})),
+            machine_gun_scalp=StrategyConfig(**data.get("machine_gun_scalp", {})),
+            mean_reversion=StrategyConfig(**data.get("mean_reversion", {})),
+            momentum=StrategyConfig(**data.get("momentum", {})),
+        )
 
 
 def validate_config(cfg: OrderflowConfig) -> None:
-    """Fail closed when critical values are missing."""
-    if cfg.market.require_real_footprint_for_exact_models and not cfg.market.allow_ohlcv_proxy:
-        pass
     if cfg.risk.account_equity is None or cfg.risk.risk_per_trade is None:
-        raise ValueError("OPERATOR_REQUIRED: account_equity and risk_per_trade must be populated before live or paper sizing is used.")
+        raise ValueError("OPERATOR_REQUIRED: account_equity and risk_per_trade must be populated before sizing or live deployment.")
     if cfg.risk.stop_buffer_ticks <= 0:
         raise ValueError("stop_buffer_ticks must be positive.")
-    if cfg.market.session_hours_utc is None and cfg.market.symbol:
-        # We intentionally refuse to infer session clocks from the transcript.
+    if cfg.market.session_hours_utc is None:
+        # Source transcript does not define session hours; we fail closed for restricted session mode.
         pass
+
+
+__all__ = [
+    "MarketConfig",
+    "RiskConfig",
+    "StrategyConfig",
+    "OrderflowConfig",
+    "validate_config",
+]

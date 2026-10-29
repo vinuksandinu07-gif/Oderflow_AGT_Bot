@@ -1,71 +1,48 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 import pandas as pd
 
-from .models import Bar, EffortBox, Signal, Side
+from .models import Bar
 
 
-@dataclass
-class EventBacktester:
-    bars: List[Bar]
-    config: Dict[str, Any]
-    broker: Any = None
-    realized: List[Dict[str, Any]] = field(default_factory=list)
-
-    def __post_init__(self):
-        if self.broker is None:
-            self.broker = type("Broker", (), {"orders": [], "fills": []})()
-
-    def run(self, strategies: Iterable[Any]) -> Dict[str, Any]:
-        strategies = list(strategies)
-        for idx, bar in enumerate(self.bars):
-            context = {
-                "bar": bar,
-                "config": self.config,
-                "profile": self._synthetic_profile(idx),
-                "delta": float(bar.close - bar.open),
-                "value_context": "bullish_drift" if bar.close >= bar.open else "bearish_drift",
-            }
-            for strategy in strategies:
-                for signal in strategy.process(context):
-                    self.realized.append({
-                        "strategy_id": signal.strategy_id,
-                        "side": signal.side.value,
-                        "timestamp": str(signal.timestamp),
-                        "entry": signal.entry_price,
-                        "stop": signal.stop_price,
-                        "target": signal.target_price,
-                    })
-        return {"signals": self.realized}
-
-    def _synthetic_profile(self, idx: int) -> Dict[str, Any]:
-        base = 100.0 + idx * 0.5
-        return {
-            "poc": base,
-            "vah": base + 1.5,
-            "val": base - 1.5,
-        }
+def load_csv_bars(path: str) -> List[Bar]:
+    """Read synthetic CSV bars. The schema is intentionally simple and clearly marked synthetic."""
+    df = pd.read_csv(path)
+    required = {"timestamp", "open", "high", "low", "close", "volume"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"CSV missing required columns: {sorted(missing)}")
+    df = df.sort_values("timestamp").reset_index(drop=True)
+    out: List[Bar] = []
+    for row in df.to_dict("records"):
+        ts = pd.Timestamp(row["timestamp"])
+        if ts.tz is None:
+            ts = ts.tz_localize("UTC")
+        else:
+            ts = ts.tz_convert("UTC")
+        out.append(Bar(timestamp=ts, open=float(row["open"]), high=float(row["high"]), low=float(row["low"]), close=float(row["close"]), volume=float(row["volume"])))
+    return out
 
 
-def build_summary_report(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+def export_json(data: Dict[str, Any], path: str) -> None:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+
+
+def build_summary_report(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+    rows = list(rows)
     if not rows:
-        return {"signals": 0, "avg_pnl": 0.0, "win_rate": 0.0}
-    pnl = [float(r.get("pnl", 0.0)) for r in rows]
-    wins = sum(1 for x in pnl if x > 0)
+        return {"signals": 0, "win_rate": 0.0, "gross_pnl": 0.0}
+    pnl_values = [float(r.get("pnl", 0.0)) for r in rows]
+    win_rate = sum(1 for x in pnl_values if x > 0) / len(pnl_values)
     return {
         "signals": len(rows),
-        "avg_pnl": float(sum(pnl) / len(pnl)),
-        "win_rate": float(wins / len(pnl)),
-        "gross_pnl": float(sum(pnl)),
+        "gross_pnl": float(sum(pnl_values)),
+        "win_rate": float(win_rate),
+        "avg_pnl": float(sum(pnl_values) / len(pnl_values)),
     }
-
-
-def export_report(summary: Dict[str, Any], path: str) -> None:
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2)

@@ -1,46 +1,75 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Sequence
 
-from .models import Bar, EffortBox, Signal, Side
+from .models import Bar, Signal, Side
 
 
-class Strategy:
+class BaseStrategy:
+    """Base strategy contract for research and paper execution.
+
+    Each strategy keeps separate trigger logic, stop logic, target logic and audit trail.
+    """
     strategy_id: str = "base"
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config or {}
 
     def process(self, context: Dict[str, Any]) -> List[Signal]:
-        return []
+        raise NotImplementedError
 
 
 @dataclass
-class DirectionalDriftStrategy(Strategy):
+class DirectionalDriftStrategy(BaseStrategy):
     strategy_id: str = "directional_drift"
+    config: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        self.config = self.config or {}
 
     def process(self, context: Dict[str, Any]) -> List[Signal]:
-        bar = context.get("bar")
+        bar: Optional[Bar] = context.get("bar")
         profile = context.get("profile")
+        value_context = context.get("value_context")
         delta = context.get("delta")
-        value_label = context.get("value_context")
-        if bar is None or profile is None:
+        cfg = context.get("config", {})
+        if bar is None or profile is None or value_context in (None, "balanced_auction"):
             return []
-        if value_label == "balanced_auction":
+        threshold = float(cfg.get("directional_drift", {}).get("delta_threshold", 0.0))
+        if delta is None and cfg.get("directional_drift", {}).get("require_delta_confirmation", True):
             return []
-        if delta is None:
-            return []
-        side = Side.LONG if (value_label == "bullish_drift" and delta > 0) or (value_label == "bullish_drift" and delta >= 0) else Side.SHORT
-        if value_label == "bearish_drift" and delta < 0:
+        if delta is not None and cfg.get("directional_drift", {}).get("require_delta_confirmation", True):
+            if value_context == "bullish_drift" and delta < threshold:
+                return []
+            if value_context == "bearish_drift" and delta > -threshold:
+                return []
+
+        if value_context == "bullish_drift":
+            side = Side.LONG
+            stop = float(profile.val)
+            entry = float(bar.close)
+            risk = abs(entry - stop)
+            if risk <= 0:
+                return []
+            target = entry + risk * max(float(cfg.get("directional_drift", {}).get("target_rr", 1.0)), 1.0)
+            invalidation = stop
+            evidence = ["bullish value migration", f"delta={delta if delta is not None else 0.0}"]
+            rationale = "Direction supported by rising value area and delta confirmation."
+        elif value_context == "bearish_drift":
             side = Side.SHORT
+            stop = float(profile.vah)
+            entry = float(bar.close)
+            risk = abs(stop - entry)
+            if risk <= 0:
+                return []
+            target = entry - risk * max(float(cfg.get("directional_drift", {}).get("target_rr", 1.0)), 1.0)
+            invalidation = stop
+            evidence = ["bearish value migration", f"delta={delta if delta is not None else 0.0}"]
+            rationale = "Direction supported by falling value area and delta confirmation."
         else:
-            side = Side.LONG if value_label == "bullish_drift" and delta >= 0 else Side.SHORT if value_label == "bearish_drift" and delta <= 0 else None
-        if side is None:
             return []
-        entry = float(bar.close)
-        stop = float(profile.val if side == Side.LONG else profile.vah)
-        target = entry + (entry - stop) * 1.5 if side == Side.LONG else entry - (stop - entry) * 1.5
+
         signal = Signal(
             strategy_id=self.strategy_id,
             side=side,
@@ -48,38 +77,58 @@ class DirectionalDriftStrategy(Strategy):
             entry_price=entry,
             stop_price=stop,
             target_price=target,
-            invalidation_level=stop,
+            invalidation_level=invalidation,
             source_refs=["value_profile", "delta"],
-            evidence=[value_label, f"delta={delta:.2f}"],
-            entry_rationale="directional drift supported by value migration and delta confirmation",
-            stop_rationale="structural stop under/over value area boundary with buffer",
+            evidence=evidence,
+            entry_rationale=rationale,
+            stop_rationale="structural stop anchored to value-area boundary with configured buffer.",
             exit_policy="trail_stop",
-            audit_trail=["directional_drift generated"],
-            confidence=0.6,
+            audit_trail=["primary drift signal", "no partial exits by default", "value context confirmed"],
+            confidence=0.67,
             data_quality="real" if delta is not None else "proxy",
         )
         return [signal]
 
 
 @dataclass
-class MachineGunScalpStrategy(Strategy):
+class MachineGunScalpStrategy(BaseStrategy):
     strategy_id: str = "machine_gun_scalp"
+    config: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        self.config = self.config or {}
 
     def process(self, context: Dict[str, Any]) -> List[Signal]:
-        bar = context.get("bar")
+        bar: Optional[Bar] = context.get("bar")
         delta = context.get("delta")
-        value_label = context.get("value_context")
-        if bar is None or delta is None or value_label == "balanced_auction":
+        value_context = context.get("value_context")
+        cfg = context.get("config", {})
+        if bar is None or value_context in (None, "balanced_auction"):
             return []
-        side = Side.LONG if delta > 0 and value_label == "bullish_drift" else Side.SHORT if delta < 0 and value_label == "bearish_drift" else None
-        if side is None:
+        if delta is None:
             return []
+        scalp_cfg = cfg.get("machine_gun_scalp", {})
+        if not scalp_cfg.get("enabled", True):
+            return []
+
+        if value_context == "bullish_drift" and delta <= float(scalp_cfg.get("delta_threshold", 0.0)):
+            return []
+        if value_context == "bearish_drift" and delta >= -float(scalp_cfg.get("delta_threshold", 0.0)):
+            return []
+
+        side = Side.LONG if value_context == "bullish_drift" else Side.SHORT
         entry = float(bar.close)
-        stop_distance = abs(bar.close - bar.low) if side == Side.LONG else abs(bar.high - bar.close)
-        if stop_distance <= 0:
+        if side == Side.LONG:
+            stop = float(bar.low)
+            risk = abs(entry - stop)
+            target = entry + risk
+        else:
+            stop = float(bar.high)
+            risk = abs(stop - entry)
+            target = entry - risk
+        if risk <= 0:
             return []
-        stop = bar.low if side == Side.LONG else bar.high
-        target = entry + (entry - stop) if side == Side.LONG else entry - (stop - entry)
+
         signal = Signal(
             strategy_id=self.strategy_id,
             side=side,
@@ -88,39 +137,66 @@ class MachineGunScalpStrategy(Strategy):
             stop_price=stop,
             target_price=target,
             invalidation_level=stop,
-            source_refs=["delta", "value_profile"],
-            evidence=[f"delta={delta:.2f}", value_label],
-            entry_rationale="switch in control with directional delta and migration confirmation",
-            stop_rationale="protected-value stop placed beyond the value area boundary",
+            source_refs=["delta", "value_context"],
+            evidence=[f"scalp value-context={value_context}", f"delta={delta}"] ,
+            entry_rationale="switch in control with directional delta and value migration confirmation.",
+            stop_rationale="protected-value stop beyond the relevant support/resistance area.",
             exit_policy="fixed_1r_target",
-            audit_trail=["scalp generated"],
-            confidence=0.55,
+            audit_trail=["machine_gun_scalp generated"],
+            confidence=0.58,
             data_quality="real",
         )
         return [signal]
 
 
 @dataclass
-class MeanReversionStrategy(Strategy):
+class MeanReversionStrategy(BaseStrategy):
     strategy_id: str = "mean_reversion"
+    config: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        self.config = self.config or {}
 
     def process(self, context: Dict[str, Any]) -> List[Signal]:
         cfg = context.get("config", {})
-        if not cfg.get("enabled", False):
+        strat_cfg = cfg.get("mean_reversion", {})
+        if not strat_cfg.get("enabled", False):
             return []
-        if not cfg.get("exit_policy"):
+        exit_policy = strat_cfg.get("exit_policy")
+        if not exit_policy or exit_policy == "config_required":
+            return []
+        bar = context.get("bar")
+        if bar is None:
             return []
         return []
 
 
 @dataclass
-class MomentumStrategy(Strategy):
+class MomentumStrategy(BaseStrategy):
     strategy_id: str = "momentum"
+    config: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        self.config = self.config or {}
 
     def process(self, context: Dict[str, Any]) -> List[Signal]:
         cfg = context.get("config", {})
-        if not cfg.get("enabled", False):
+        strat_cfg = cfg.get("momentum", {})
+        if not strat_cfg.get("enabled", False):
             return []
-        if not cfg.get("exit_policy"):
+        exit_policy = strat_cfg.get("exit_policy")
+        if not exit_policy or exit_policy == "config_required":
+            return []
+        bar = context.get("bar")
+        if bar is None:
             return []
         return []
+
+
+__all__ = [
+    "BaseStrategy",
+    "DirectionalDriftStrategy",
+    "MachineGunScalpStrategy",
+    "MeanReversionStrategy",
+    "MomentumStrategy",
+]
