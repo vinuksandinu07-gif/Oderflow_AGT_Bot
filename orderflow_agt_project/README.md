@@ -1,14 +1,15 @@
 # Orderflow AGT project
 
-This repository contains a research-first, source-aware order-flow trading framework inspired by the NASDAQ order-flow concepts discussed in the supplied transcript.
+This repository contains a research-first, source-aware order-flow trading framework inspired by Nasdaq order-flow concepts discussed in the supplied transcript. The implementation is intentionally conservative and avoids claiming to reproduce the proprietary NASDAQ Effort formula exactly.
 
-Important constraints from the source brief are reflected in the design:
-- The project does not claim to reproduce the proprietary NASDAQ Effort formula exactly.
-- Real footprint / MBO inputs are treated as the only trusted source of order-flow edge.
-- OHLCV-only mode is deliberately named `ohlcv_proxy` and disabled by default.
-- The system fails closed when operator-required configuration is missing.
+Key design constraints
+- No proprietary formula is assumed or claimed to exist.
+- Real footprint / executed trade / vendor MBO inputs are treated as the trusted data source.
+- OHLCV-only behavior is labeled `ohlcv_proxy` and is disabled by default.
+- Missing operator-required settings fail closed instead of being silently guessed.
+- Session clocks are not inferred from the transcript; the operator must provide them if live or session-restricted behavior is needed.
 
-## Project layout
+Project layout
 
 ```text
 orderflow_agt_project/
@@ -35,7 +36,7 @@ orderflow_agt_project/
     └── demo_backtest.py
 ```
 
-## Quick start
+Quick start
 
 PowerShell:
 
@@ -59,23 +60,25 @@ pytest -q
 python examples/demo_backtest.py
 ```
 
-## What is implemented
+What is included
+- typed contracts for bars, quotes, footprint snapshots, value profiles, effort boxes, orders, fills, positions, and signals
+- deterministic feature modules for delta, VWAP, value migration, absorption, and proxy labeling
+- separate strategy engines for directional drift and machine-gun scalp, plus placeholder mean-reversion / momentum stubs gated behind explicit configuration
+- centralized risk sizing and validation logic with fail-closed behavior
+- event-driven deterministic replay and paper execution scaffolding
+- summary reporting and export utilities for JSON/CSV
+- explicit configuration provenance labels for source-derived, engineering-assumption, experimental proxy, and operator-required values
 
-- typed data contracts for bars, quotes, footprint snapshots, value profiles, effort signals and orders
-- deterministic feature modules for delta, VWAP, value profile, migration, absorption and OHLCV proxy classification
-- separate strategy engines for directional drift, machine-gun scalp, mean reversion and momentum
-- central risk manager with fail-closed validation
-- event-driven backtest with paper execution and deterministic replay
-- metrics/report export with synthetic-data labels
-- configuration files with provenance labels and explicit operator-required settings
+Important caveats
+- This is a research framework, not a live-trading system.
+- The project intentionally does not claim profitability or source-faithful replication of Fabio’s proprietary model.
+- Real order-flow data remains the only trusted path for exact-data strategies.
+- Any live or session-restricted setup must provide explicit operator inputs for session windows, account sizing, and risk limits.
 
-## Important caveats
+Replay and reporting notes
+- The backtest engine is deterministic and uses the same strategy interface expected by paper/live execution.
+- Summary metrics are exportable in JSON/CSV and are intended for research transparency, not for claiming strategy success.
+- The framework explicitly surfaces uncertainty, sample-size limits, and the fact that synthetic fixtures are not a substitute for real historical data.
 
-- This is a research framework, not a live trading system.
-- Live execution is disabled by default and does not send orders without explicit safety flags.
-- Data provenance matters: no fake footprint or proprietary Effort signal is fabricated.
-- The source transcript does not disclose the proprietary NASDAQ Effort formula or thresholds; those remain configurable placeholders rather than source facts.
-
-## Demo / sample run
-
-The demo script runs a synthetic historical backtest using a research configuration and writes a JSON report to the local output folder.
+Example research output
+The project emits JSON/CSV summary data in the output folder when the report routine is used. This is meant to support auditability and reproducibility for synthetic research runs.
